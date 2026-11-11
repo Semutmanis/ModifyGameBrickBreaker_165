@@ -1,4 +1,5 @@
 import math
+import os
 import random
 import pygame
 
@@ -12,16 +13,20 @@ BALL_R = 9
 BASE_SPEED = 6.0
 MAX_SPEED = 12.0
 MAX_BALLS = 8
+MAX_LIVES = 5
 
 ROWS, COLS = 6, 10
 GAP = 5
-TOP = 70
+TOP = 112             # ruang untuk HUD di atas
 BRICK_H = 24
+TOTAL_BRICKS = ROWS * COLS
 TOUGH_CHANCE = 0.25   # brick yang butuh 2 pukulan
 DROP_CHANCE = 0.20    # peluang brick pecah menjatuhkan power-up
 
 PADDLE_COLOR = (130, 205, 255)
 ELECTRO = (200, 140, 255)
+LABEL_COLOR = (175, 155, 215)
+GOLD = (255, 214, 100)
 
 ROW_COLORS = [
     (255, 85, 110), (255, 150, 60), (255, 220, 70),
@@ -38,6 +43,44 @@ POWERUPS = {
     "laser": ("LASER",  (255, 70, 70),   480, 2),
     "life":  ("+1",     (255, 90, 120),  0,   1),
 }
+POWERUP_DESC = {
+    "multi": "Bola membelah jadi tiga",
+    "wide":  "Papan jadi lebih lebar",
+    "fast":  "Papan bergerak lebih cepat",
+    "slow":  "Bola melambat sementara",
+    "fire":  "Bola menembus semua brick",
+    "laser": "Papan menembak otomatis",
+    "life":  "Tambah 1 nyawa",
+}
+LEGEND_ORDER = ["multi", "wide", "fast", "slow", "fire", "laser", "life"]
+
+BEST_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best_score.txt")
+
+
+# ---------- Skor terbaik ----------
+def load_best():
+    try:
+        with open(BEST_FILE) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def save_best(v):
+    try:
+        with open(BEST_FILE, "w") as f:
+            f.write(str(int(v)))
+    except OSError:
+        pass
+
+
+def fmt_num(n):
+    return f"{int(n):,}".replace(",", ".")
+
+
+def fmt_time(frames):
+    s = frames // FPS
+    return f"{s // 60:02d}:{s % 60:02d}"
 
 
 # ---------- Utilitas umum ----------
@@ -83,53 +126,91 @@ def text_center(surf, font, text, pos, color=(255, 255, 255)):
     surf.blit(img, img.get_rect(center=pos))
 
 
+def draw_text(surf, font, text, pos, color=(255, 255, 255), anchor="topleft", alpha=None):
+    img = font.render(text, True, color)
+    if alpha is not None:
+        img.set_alpha(alpha)
+    r = img.get_rect(**{anchor: pos})
+    surf.blit(img, r)
+    return r
+
+
+def blit_scaled(surf, img, topleft, scale):
+    if scale > 1.01:
+        w, h = img.get_size()
+        img2 = pygame.transform.smoothscale(img, (int(w * scale), int(h * scale)))
+        surf.blit(img2, (topleft[0], topleft[1] - (img2.get_height() - h) // 2))
+    else:
+        surf.blit(img, topleft)
+
+
+# ---------- Komponen UI ----------
+_panel_cache = {}
+
+
+def panel(surf, rect, fill=(16, 9, 36, 150), border=(200, 140, 255, 90), radius=14):
+    key = (rect.w, rect.h, fill, border, radius)
+    p = _panel_cache.get(key)
+    if p is None:
+        p = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+        pygame.draw.rect(p, fill, p.get_rect(), border_radius=radius)
+        pygame.draw.rect(p, border, p.get_rect(), 1, border_radius=radius)
+        _panel_cache[key] = p
+    surf.blit(p, rect.topleft)
+
+
+def bar(surf, rect, frac, color, bg=(50, 40, 80)):
+    pygame.draw.rect(surf, bg, rect, border_radius=rect.h // 2)
+    w = int(rect.w * max(0.0, min(1.0, frac)))
+    if w > 0:
+        pygame.draw.rect(surf, color, (rect.x, rect.y, max(w, rect.h), rect.h), border_radius=rect.h // 2)
+
+
 # ---------- Ikon skill ----------
 def draw_icon(surf, kind, cx, cy, s, c=(255, 255, 255)):
-    """Gambar ikon skill dengan ukuran setengah-lebar s."""
     w = max(2, int(s * 0.28))
-    if kind == "multi":      # satu bola membelah jadi tiga
+    if kind == "multi":
         pygame.draw.line(surf, c, (cx, cy - s * 0.1), (cx - s * 0.75, cy + s * 0.5), 1)
         pygame.draw.line(surf, c, (cx, cy - s * 0.1), (cx + s * 0.75, cy + s * 0.5), 1)
         pygame.draw.circle(surf, c, (cx, int(cy - s * 0.25)), max(2, int(s * 0.36)))
         pygame.draw.circle(surf, c, (int(cx - s * 0.75), int(cy + s * 0.55)), max(2, int(s * 0.28)))
         pygame.draw.circle(surf, c, (int(cx + s * 0.75), int(cy + s * 0.55)), max(2, int(s * 0.28)))
-    elif kind == "wide":     # panah dua arah
+    elif kind == "wide":
         pygame.draw.line(surf, c, (cx - s * 0.8, cy), (cx + s * 0.8, cy), w)
         pygame.draw.polygon(surf, c, [(cx - s, cy), (cx - s * 0.45, cy - s * 0.5), (cx - s * 0.45, cy + s * 0.5)])
         pygame.draw.polygon(surf, c, [(cx + s, cy), (cx + s * 0.45, cy - s * 0.5), (cx + s * 0.45, cy + s * 0.5)])
-    elif kind == "fast":     # dua chevron >>
+    elif kind == "fast":
         for off in (-0.55, 0.1):
             pts = [(cx + s * off, cy - s * 0.7), (cx + s * (off + 0.6), cy), (cx + s * off, cy + s * 0.7)]
             pygame.draw.lines(surf, c, False, pts, w)
-    elif kind == "slow":     # jam
+    elif kind == "slow":
         pygame.draw.circle(surf, c, (cx, cy), int(s), max(2, w - 1))
         pygame.draw.line(surf, c, (cx, cy), (cx, cy - s * 0.62), w)
         pygame.draw.line(surf, c, (cx, cy), (cx + s * 0.45, cy + s * 0.1), w)
-    elif kind == "fire":     # api
+    elif kind == "fire":
         outer = [(0, -1), (0.55, -0.1), (0.7, 0.35), (0.35, 0.85), (0, 1), (-0.35, 0.85),
                  (-0.7, 0.35), (-0.45, -0.05), (-0.2, -0.4)]
         pygame.draw.polygon(surf, c, [(cx + px * s, cy + py * s) for px, py in outer])
         inner = [(0, 0.1), (0.3, 0.5), (0.18, 0.85), (-0.18, 0.85), (-0.3, 0.5)]
         pygame.draw.polygon(surf, (255, 200, 80), [(cx + px * s, cy + py * s) for px, py in inner])
-    elif kind == "laser":    # dua sinar ke atas
+    elif kind == "laser":
         for sx in (-0.5, 0.5):
             x = cx + s * sx
             pygame.draw.line(surf, c, (x, cy + s * 0.6), (x, cy - s * 0.35), w)
             pygame.draw.polygon(surf, c, [(x, cy - s), (x - s * 0.28, cy - s * 0.35), (x + s * 0.28, cy - s * 0.35)])
         pygame.draw.line(surf, c, (cx - s * 0.85, cy + s * 0.85), (cx + s * 0.85, cy + s * 0.85), w)
-    elif kind == "life":     # hati
+    elif kind == "life":
         draw_heart(surf, int(cx), int(cy - s * 0.4), max(3, int(s * 0.55)), c)
 
 
 def draw_orb(surf, kind, cx, cy, tick, r=18, s=10, sparkle=True):
-    """Orb power-up bergaya elemen: cincin berwarna + ikon + titik yang mengorbit."""
     _, col, _, _ = POWERUPS[kind]
     pulse = 1 + 0.07 * math.sin(tick * 0.15) if sparkle else 1
     rr = int(r * pulse)
     if sparkle:
         glow(surf, (cx, cy), r * 2, col, 85)
     pygame.draw.circle(surf, tuple(int(v * 0.3) for v in col), (cx, cy), rr)
-    pygame.draw.circle(surf, col, (cx, cy), rr, 3)
+    pygame.draw.circle(surf, col, (cx, cy), rr, 3 if r > 12 else 2)
     pygame.draw.circle(surf, (255, 255, 255), (cx, cy), rr + 1, 1)
     draw_icon(surf, kind, cx, cy, s)
     if sparkle:
@@ -139,7 +220,7 @@ def draw_orb(surf, kind, cx, cy, tick, r=18, s=10, sparkle=True):
                                            int(cy + math.sin(a) * (rr + 8))), 2)
 
 
-# ---------- Latar bergaya Inazuma ----------
+# ---------- Latar bergaya badai petir ----------
 def make_sky():
     stops = [(0.00, (16, 8, 40)), (0.45, (58, 24, 100)), (0.74, (150, 60, 150)),
              (0.80, (200, 100, 175)), (0.83, (60, 24, 90)), (1.00, (22, 10, 40))]
@@ -163,7 +244,7 @@ def make_clouds():
         x, y = rng.uniform(0, WIDTH), rng.uniform(0, 330)
         w, h = rng.uniform(220, 460), rng.uniform(50, 120)
         if y > 220:
-            col = (110, 55, 160, rng.randint(55, 90))     # tepi awan terkena cahaya
+            col = (110, 55, 160, rng.randint(55, 90))
         else:
             col = (rng.randint(24, 50), rng.randint(8, 24), rng.randint(55, 95), rng.randint(70, 120))
         for dx in (-sw, 0, sw):
@@ -206,25 +287,21 @@ def make_sigil_inner():
 
 
 def make_front():
-    """Siluet depan: laut, pulau, kuil, torii, dan pohon sakura (digambar sekali)."""
     s = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     dark = (24, 10, 40, 255)
     mid = (40, 18, 66, 255)
     rng = random.Random(7)
 
-    # laut
     pygame.draw.rect(s, (26, 12, 48, 255), (0, 505, WIDTH, HEIGHT - 505))
     for y in range(512, HEIGHT, 13):
         for x in range(-20, WIDTH, 70):
             xo = x + (y % 26) * 2
             pygame.draw.line(s, (130, 80, 190, 45), (xo, y), (xo + 34, y), 1)
 
-    # pulau
     pygame.draw.polygon(s, mid, [(430, 506), (480, 478), (540, 470), (600, 466), (660, 472),
                                  (720, 486), (790, 482), (800, 486), (800, 506)])
     pygame.draw.polygon(s, mid, [(0, 506), (0, 486), (60, 480), (120, 488), (200, 500), (215, 506)])
 
-    # kuil bertingkat
     cx, base = 610, 468
     for i, w in enumerate((96, 76, 58, 40)):
         yb = base - i * 20
@@ -236,7 +313,6 @@ def make_front():
                                       (cx + w // 2, yt - 10), (cx - w // 2, yt - 10)])
     pygame.draw.line(s, dark, (cx, base - 4 * 20 + 6), (cx, base - 4 * 20 - 18), 3)
 
-    # torii
     tx, y0 = 170, 392
     tor = (62, 14, 52, 255)
     pygame.draw.rect(s, tor, (tx - 36, y0, 9, 110))
@@ -245,7 +321,6 @@ def make_front():
     pygame.draw.polygon(s, tor, [(tx - 66, y0 + 2), (tx - 54, y0 - 9), (tx + 54, y0 - 9),
                                  (tx + 66, y0 + 2), (tx + 52, y0 + 9), (tx - 52, y0 + 9)])
 
-    # pohon sakura di tepi
     pinks = [(255, 170, 205), (250, 140, 190), (255, 200, 225), (240, 120, 175)]
 
     def tree(x, by, sc):
@@ -335,15 +410,163 @@ def pick_powerup():
     return random.choices(kinds, weights)[0]
 
 
+# ---------- Gambar HUD & layar ----------
+def draw_hud(surf, fonts, score_img_scale, disp_score, best, level, bricks_left, play_frames,
+             lives, combo, effects, tick, hue):
+    f_label, f_text, f_val = fonts["label"], fonts["text"], fonts["val"]
+
+    # Panel skor
+    r = pygame.Rect(10, 8, 230, 58)
+    panel(surf, r)
+    draw_text(surf, f_label, "SKOR", (r.x + 16, r.y + 8), LABEL_COLOR)
+    img = f_val.render(fmt_num(disp_score), True, (255, 255, 255))
+    blit_scaled(surf, img, (r.x + 16, r.y + 22), score_img_scale)
+    draw_text(surf, f_label, "TERBAIK", (r.right - 14, r.y + 10), LABEL_COLOR, "topright")
+    draw_text(surf, f_text, fmt_num(best), (r.right - 14, r.y + 26), GOLD, "topright")
+
+    # Panel level + progres
+    r = pygame.Rect((WIDTH - 200) // 2, 8, 200, 58)
+    panel(surf, r)
+    pct = 1 - bricks_left / TOTAL_BRICKS
+    draw_text(surf, f_text, f"LEVEL {level}", (r.x + 16, r.y + 10), (255, 235, 150))
+    draw_text(surf, f_label, f"{int(pct * 100)}%", (r.right - 16, r.y + 13), LABEL_COLOR, "topright")
+    bar(surf, pygame.Rect(r.x + 16, r.y + 36, r.w - 32, 9), pct, (120, 220, 255))
+    draw_text(surf, f_label, f"{TOTAL_BRICKS - bricks_left}/{TOTAL_BRICKS} brick", (r.centerx, r.bottom - 4),
+              LABEL_COLOR, "midbottom")
+
+    # Panel waktu + nyawa
+    r = pygame.Rect(WIDTH - 240, 8, 230, 58)
+    panel(surf, r)
+    draw_text(surf, f_label, "WAKTU", (r.x + 16, r.y + 8), LABEL_COLOR)
+    draw_text(surf, f_val, fmt_time(play_frames), (r.x + 16, r.y + 22), (255, 255, 255))
+    draw_text(surf, f_label, "NYAWA", (r.right - 14, r.y + 10), LABEL_COLOR, "topright")
+    for i in range(MAX_LIVES):
+        hx = r.right - 22 - (MAX_LIVES - 1 - i) * 19
+        col = (255, 80, 110) if i < lives else (70, 48, 98)
+        draw_heart(surf, hx, r.y + 34, 6, col)
+
+    # Baris kedua: chip efek aktif (kiri) + combo (kanan)
+    x = 10
+    for kind, left in effects.items():
+        name, col, dur, _ = POWERUPS[kind]
+        cr = pygame.Rect(x, 74, 124, 28)
+        panel(surf, cr, radius=12, border=(*col, 140))
+        draw_orb(surf, kind, cr.x + 15, cr.centery, tick, r=10, s=6, sparkle=False)
+        draw_text(surf, f_label, name, (cr.x + 32, cr.y + 3), col)
+        draw_text(surf, f_label, f"{math.ceil(left / FPS)}d", (cr.right - 8, cr.y + 3), (255, 255, 255), "topright")
+        bar(surf, pygame.Rect(cr.x + 32, cr.y + 19, cr.w - 42, 4), left / dur, col)
+        x += cr.w + 6
+
+    if combo >= 2:
+        cr = pygame.Rect(WIDTH - 10 - 132, 74, 132, 28)
+        panel(surf, cr, radius=12, border=(255, 200, 90, 170))
+        text_center(surf, f_text, f"COMBO x{combo}", cr.center, hue_color(hue * 2))
+
+
+def draw_dim(surf, dim):
+    surf.blit(dim, (0, 0))
+
+
+def draw_menu(surf, fonts, best, tick):
+    f_label, f_text, f_title = fonts["label"], fonts["text"], fonts["title"]
+    card = pygame.Rect(120, 50, 560, 500)
+    panel(surf, card, fill=(14, 8, 34, 215), border=(200, 140, 255, 140), radius=22)
+    text_center(surf, f_title, "BRICK BREAKER", (WIDTH // 2, card.y + 46), (255, 255, 255))
+    text_center(surf, f_label, "EDISI BADAI PETIR", (WIDTH // 2, card.y + 82), ELECTRO)
+
+    draw_text(surf, f_label, "POWER-UP", (card.x + 30, card.y + 112), LABEL_COLOR)
+    pygame.draw.line(surf, (90, 70, 130), (card.x + 100, card.y + 119), (card.right - 30, card.y + 119), 1)
+    for i, kind in enumerate(LEGEND_ORDER):
+        col_i, row_i = (0, i) if i < 4 else (1, i - 4)
+        x = card.x + 30 + col_i * 262
+        y = card.y + 134 + row_i * 46
+        draw_orb(surf, kind, x + 15, y + 17, tick, r=13, s=8, sparkle=False)
+        draw_text(surf, f_text, POWERUPS[kind][0], (x + 40, y), POWERUPS[kind][1])
+        draw_text(surf, f_label, POWERUP_DESC[kind], (x + 40, y + 20), (210, 195, 235))
+
+    # info brick keras
+    by = card.y + 330
+    br = pygame.Rect(card.x + 30, by, 40, 16)
+    pygame.draw.rect(surf, (255, 150, 60), br, border_radius=5)
+    pygame.draw.rect(surf, (255, 255, 255), br, 2, border_radius=5)
+    draw_text(surf, f_label, "Brick bertepi putih butuh 2 pukulan (jadi gelap & retak setelah pukulan pertama)",
+              (br.right + 12, by + 1), (210, 195, 235))
+
+    # kontrol
+    ky = card.y + 372
+    keys = [("← →", "Gerak"), ("SPASI", "Luncurkan"), ("P", "Jeda")]
+    kx = card.x + 30
+    for k, label in keys:
+        kr = draw_text(surf, f_text, k, (kx + 10, ky + 4), (255, 255, 255))
+        box = kr.inflate(20, 10)
+        panel(surf, box, radius=8, fill=(60, 40, 100, 200), border=(200, 140, 255, 160))
+        draw_text(surf, f_text, k, kr.topleft, (255, 255, 255))
+        lr = draw_text(surf, f_label, label, (box.right + 8, ky + 8), LABEL_COLOR)
+        kx = lr.right + 28
+
+    draw_text(surf, f_label, "SKOR TERBAIK", (WIDTH // 2, card.y + 424), LABEL_COLOR, "midtop")
+    text_center(surf, f_text, fmt_num(best), (WIDTH // 2, card.y + 454), GOLD)
+
+    a = int(150 + 105 * math.sin(tick * 0.08))
+    draw_text(surf, fonts["cta"], "Tekan SPASI untuk mulai", (WIDTH // 2, card.bottom - 20),
+              (255, 255, 255), "center", alpha=a)
+
+
+def draw_ready(surf, fonts, tick):
+    r = pygame.Rect(0, 0, 380, 40)
+    r.center = (WIDTH // 2, 410)
+    panel(surf, r, radius=20)
+    a = int(170 + 85 * math.sin(tick * 0.1))
+    draw_text(surf, fonts["text"], "Tekan SPASI untuk meluncurkan bola", r.center, (255, 255, 255), "center", alpha=a)
+
+
+def draw_pause(surf, fonts, dim):
+    surf.blit(dim, (0, 0))
+    r = pygame.Rect(0, 0, 320, 130)
+    r.center = (WIDTH // 2, HEIGHT // 2)
+    panel(surf, r, fill=(14, 8, 34, 225), border=(200, 140, 255, 150), radius=20)
+    text_center(surf, fonts["title"], "JEDA", (r.centerx, r.y + 46), (255, 255, 255))
+    text_center(surf, fonts["label"], "Tekan P untuk melanjutkan", (r.centerx, r.y + 96), LABEL_COLOR)
+
+
+def draw_gameover(surf, fonts, dim, stats, tick):
+    surf.blit(dim, (0, 0))
+    f_label, f_text = fonts["label"], fonts["text"]
+    card = pygame.Rect(0, 0, 430, 330)
+    card.center = (WIDTH // 2, HEIGHT // 2)
+    panel(surf, card, fill=(14, 8, 34, 230), border=(255, 100, 130, 160), radius=22)
+    text_center(surf, fonts["title"], "GAME OVER", (card.centerx, card.y + 44), (255, 100, 120))
+    if stats["new_record"]:
+        a = int(170 + 85 * math.sin(tick * 0.12))
+        draw_text(surf, f_text, "REKOR BARU!", (card.centerx, card.y + 84), GOLD, "center", alpha=a)
+    items = [("SKOR", fmt_num(stats["score"])), ("TERBAIK", fmt_num(stats["best"])),
+             ("WAKTU", fmt_time(stats["frames"])), ("LEVEL", str(stats["level"])),
+             ("BRICK HANCUR", str(stats["bricks"])), ("COMBO MAKS", f"x{stats['max_combo']}")]
+    for i, (label, value) in enumerate(items):
+        cx_ = card.x + 40 + (i % 2) * 190
+        cy_ = card.y + 112 + (i // 2) * 54
+        draw_text(surf, f_label, label, (cx_, cy_), LABEL_COLOR)
+        draw_text(surf, fonts["val"], value, (cx_, cy_ + 14), (255, 255, 255))
+    a = int(150 + 105 * math.sin(tick * 0.08))
+    draw_text(surf, fonts["cta"], "Tekan SPASI untuk main lagi", (card.centerx, card.bottom - 26),
+              (255, 255, 255), "center", alpha=a)
+
+
 def main():
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Brick Breaker Inazuma")
+    pygame.display.set_caption("Brick Breaker - Badai Petir")
     clock = pygame.time.Clock()
-    font = pygame.font.SysFont("arial", 22, bold=True)
-    big = pygame.font.SysFont("arial", 56, bold=True)
-    small = pygame.font.SysFont("arial", 18, bold=True)
-    
+
+    fam = "segoeui,helveticaneue,arial"
+    fonts = {
+        "label": pygame.font.SysFont(fam, 12, bold=True),
+        "text": pygame.font.SysFont(fam, 16, bold=True),
+        "val": pygame.font.SysFont(fam, 28, bold=True),
+        "cta": pygame.font.SysFont(fam, 20, bold=True),
+        "title": pygame.font.SysFont(fam, 44, bold=True),
+        "pop": pygame.font.SysFont(fam, 22, bold=True),
+    }
 
     canvas = pygame.Surface((WIDTH, HEIGHT))
 
@@ -357,6 +580,8 @@ def main():
     flash_surf.fill((190, 150, 255))
     slow_tint = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
     slow_tint.fill((60, 255, 200, 22))
+    dim = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    dim.fill((8, 4, 20, 150))
     mote_sprite = pygame.Surface((20, 20), pygame.SRCALPHA)
     for r in range(10, 0, -1):
         pygame.draw.circle(mote_sprite, (*ELECTRO, int(255 * (1 - r / 10) ** 2)), (10, 10), r)
@@ -381,17 +606,26 @@ def main():
     speed = BASE_SPEED
     particles = []   # [x, y, vx, vy, life, maxlife, color, size, gravity]
     popups = []      # [x, y, text, life, color]
-    rings = []       # [x, y, r, life, maxlife, color]
+    rings = []       # [x, y, r, life, maxlife, color, maxr]
     drops = []       # [x, y, kind]
     bullets = []     # [x, y]
     effects = {}
     bricks = build_bricks()
     score, lives, level, combo = 0, 3, 1, 0
+    disp_score = 0.0
+    score_pulse = 0.0
+    play_frames = 0
+    bricks_destroyed = 0
+    max_combo = 0
+    best = load_best()
+    best_at_start = best
+    new_record = False
     shake = 0.0
     hue = 0.0
     laser_cd = 0
     tick = 0
-    state = "ready"  # ready | playing | lost
+    paused = False
+    state = "menu"   # menu | ready | playing | lost
 
     def reset_ball():
         balls.clear()
@@ -422,12 +656,15 @@ def main():
         rings.append([x, y, 10, 22, 22, color, maxr])
 
     def destroy_brick(b):
-        nonlocal score, combo, speed, shake
+        nonlocal score, combo, speed, shake, score_pulse, bricks_destroyed, max_combo
         if b in bricks:
             bricks.remove(b)
         combo += 1
+        max_combo = max(max_combo, combo)
+        bricks_destroyed += 1
         pts = 10 * combo
         score += pts
+        score_pulse = 1.0
         burst(b.rect.centerx, b.rect.centery, b.color)
         popups.append([b.rect.centerx, b.rect.centery, f"+{pts}", 40, b.color])
         shake = max(shake, 6)
@@ -453,9 +690,28 @@ def main():
                 if len(balls) < MAX_BALLS:
                     balls.append(e)
         elif kind == "life":
-            lives = min(5, lives + 1)
+            lives = min(MAX_LIVES, lives + 1)
         else:
             effects[kind] = dur
+
+    def new_game():
+        nonlocal bricks, score, lives, level, combo, speed, disp_score, play_frames
+        nonlocal bricks_destroyed, max_combo, best_at_start, new_record, state
+        bricks = build_bricks()
+        score, lives, level, combo = 0, 3, 1, 0
+        disp_score = 0.0
+        play_frames = 0
+        bricks_destroyed = 0
+        max_combo = 0
+        best_at_start = best
+        new_record = False
+        speed = BASE_SPEED
+        particles.clear()
+        popups.clear()
+        rings.clear()
+        clear_extras()
+        reset_ball()
+        state = "ready"
 
     running = True
     reset_ball()
@@ -463,173 +719,200 @@ def main():
         clock.tick(FPS)
         tick += 1
         hue += 1.2
+        active = (not paused) and state != "menu"
+
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
                 running = False
             if e.type == pygame.KEYDOWN:
                 if e.key == pygame.K_ESCAPE:
                     running = False
-                if e.key == pygame.K_SPACE:
-                    if state == "ready":
+                if e.key == pygame.K_p and state in ("ready", "playing"):
+                    paused = not paused
+                if e.key == pygame.K_SPACE and not paused:
+                    if state == "menu":
+                        new_game()
+                    elif state == "ready":
                         launch_ball()
                         state = "playing"
                     elif state == "lost":
-                        bricks = build_bricks()
-                        score, lives, level, combo = 0, 3, 1, 0
-                        speed = BASE_SPEED
-                        particles.clear()
-                        popups.clear()
-                        rings.clear()
-                        clear_extras()
-                        reset_ball()
+                        new_game()
+
+        if active:
+            # ----- Input: tombol panah -----
+            keys = pygame.key.get_pressed()
+            pspeed = PADDLE_SPEED * (1.7 if "fast" in effects else 1.0)
+            if keys[pygame.K_LEFT]:
+                paddle.x -= pspeed
+            if keys[pygame.K_RIGHT]:
+                paddle.x += pspeed
+
+            paddle_w += ((PADDLE_W * 1.5 if "wide" in effects else PADDLE_W) - paddle_w) * 0.15
+            cx = paddle.centerx
+            paddle.w = int(paddle_w)
+            paddle.centerx = cx
+            paddle.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
+            paddle_hist.append(paddle.copy())
+            if len(paddle_hist) > 7:
+                paddle_hist.pop(0)
+
+            for k in list(effects):
+                effects[k] -= 1
+                if effects[k] <= 0:
+                    del effects[k]
+
+            # ----- Update -----
+            if state == "ready":
+                balls[0].x, balls[0].y = paddle.centerx, paddle.top - BALL_R - 1
+                balls[0].trail.clear()
+            elif state == "playing":
+                play_frames += 1
+                tgt = target_speed()
+                fire = "fire" in effects
+
+                for ball in balls[:]:
+                    m = math.hypot(ball.vx, ball.vy)
+                    if m:
+                        ball.vx, ball.vy = ball.vx / m * tgt, ball.vy / m * tgt
+                    ball.x += ball.vx
+                    ball.y += ball.vy
+                    ball.trail.append((ball.x, ball.y))
+                    if len(ball.trail) > 14:
+                        ball.trail.pop(0)
+
+                    if ball.x - BALL_R <= 0:
+                        ball.x, ball.vx = BALL_R, abs(ball.vx)
+                    elif ball.x + BALL_R >= WIDTH:
+                        ball.x, ball.vx = WIDTH - BALL_R, -abs(ball.vx)
+                    if ball.y - BALL_R <= 0:
+                        ball.y, ball.vy = BALL_R, abs(ball.vy)
+
+                    rect = pygame.Rect(ball.x - BALL_R, ball.y - BALL_R, BALL_R * 2, BALL_R * 2)
+
+                    if rect.colliderect(paddle) and ball.vy > 0:
+                        off = max(-1, min(1, (ball.x - paddle.centerx) / (paddle.w / 2)))
+                        a = math.radians(270 + off * 60)
+                        ball.vx, ball.vy = tgt * math.cos(a), tgt * math.sin(a)
+                        ball.y = paddle.top - BALL_R
+                        combo = 0
+                        burst(ball.x, paddle.top, PADDLE_COLOR, 6)
+
+                    if fire:
+                        for b in bricks[:]:
+                            if rect.colliderect(b.rect):
+                                shake = max(shake, 3)
+                                destroy_brick(b)
+                    else:
+                        for b in bricks:
+                            if rect.colliderect(b.rect):
+                                ox = min(rect.right - b.rect.left, b.rect.right - rect.left)
+                                oy = min(rect.bottom - b.rect.top, b.rect.bottom - rect.top)
+                                if ox < oy:
+                                    ball.vx *= -1
+                                else:
+                                    ball.vy *= -1
+                                b.hp -= 1
+                                shake = max(shake, 3)
+                                if b.hp <= 0:
+                                    destroy_brick(b)
+                                else:
+                                    burst(b.rect.centerx, b.rect.centery, (255, 255, 255), 6)
+                                break
+
+                    if ball.y - BALL_R > HEIGHT:
+                        balls.remove(ball)
+
+                if not balls:
+                    lives -= 1
+                    combo = 0
+                    shake = 12
+                    burst(paddle.centerx, HEIGHT - 10, (255, 80, 80), 30)
+                    clear_extras()
+                    reset_ball()
+                    if lives <= 0:
+                        state = "lost"
+                        new_record = score > best_at_start and score > 0
+                        if score > best:
+                            best = score
+                            save_best(best)
+                    else:
                         state = "ready"
 
-        # ----- Input: tombol panah -----
-        keys = pygame.key.get_pressed()
-        pspeed = PADDLE_SPEED * (1.7 if "fast" in effects else 1.0)
-        if keys[pygame.K_LEFT]:
-            paddle.x -= pspeed
-        if keys[pygame.K_RIGHT]:
-            paddle.x += pspeed
+                if state == "playing" and "laser" in effects:
+                    laser_cd -= 1
+                    if laser_cd <= 0:
+                        for lx in (paddle.left + 8, paddle.right - 8):
+                            bullets.append([lx, paddle.top])
+                            burst(lx, paddle.top - 6, (255, 120, 120), 4, 0.0)
+                        laser_cd = 20
 
-        paddle_w += ((PADDLE_W * 1.5 if "wide" in effects else PADDLE_W) - paddle_w) * 0.15
-        cx = paddle.centerx
-        paddle.w = int(paddle_w)
-        paddle.centerx = cx
-        paddle.clamp_ip(pygame.Rect(0, 0, WIDTH, HEIGHT))
-        paddle_hist.append(paddle.copy())
-        if len(paddle_hist) > 7:
-            paddle_hist.pop(0)
-
-        for k in list(effects):
-            effects[k] -= 1
-            if effects[k] <= 0:
-                del effects[k]
-
-        # ----- Update -----
-        if state == "ready":
-            balls[0].x, balls[0].y = paddle.centerx, paddle.top - BALL_R - 1
-            balls[0].trail.clear()
-        elif state == "playing":
-            tgt = target_speed()
-            fire = "fire" in effects
-
-            for ball in balls[:]:
-                m = math.hypot(ball.vx, ball.vy)
-                if m:
-                    ball.vx, ball.vy = ball.vx / m * tgt, ball.vy / m * tgt
-                ball.x += ball.vx
-                ball.y += ball.vy
-                ball.trail.append((ball.x, ball.y))
-                if len(ball.trail) > 14:
-                    ball.trail.pop(0)
-
-                if ball.x - BALL_R <= 0:
-                    ball.x, ball.vx = BALL_R, abs(ball.vx)
-                elif ball.x + BALL_R >= WIDTH:
-                    ball.x, ball.vx = WIDTH - BALL_R, -abs(ball.vx)
-                if ball.y - BALL_R <= 0:
-                    ball.y, ball.vy = BALL_R, abs(ball.vy)
-
-                rect = pygame.Rect(ball.x - BALL_R, ball.y - BALL_R, BALL_R * 2, BALL_R * 2)
-
-                if rect.colliderect(paddle) and ball.vy > 0:
-                    off = max(-1, min(1, (ball.x - paddle.centerx) / (paddle.w / 2)))
-                    a = math.radians(270 + off * 60)
-                    ball.vx, ball.vy = tgt * math.cos(a), tgt * math.sin(a)
-                    ball.y = paddle.top - BALL_R
-                    combo = 0
-                    burst(ball.x, paddle.top, PADDLE_COLOR, 6)
-
-                if fire:
-                    for b in bricks[:]:
-                        if rect.colliderect(b.rect):
-                            shake = max(shake, 3)
-                            destroy_brick(b)
-                else:
+                for bl in bullets[:]:
+                    bl[1] -= 12
+                    brect = pygame.Rect(bl[0] - 2, bl[1], 4, 14)
+                    hit = False
                     for b in bricks:
-                        if rect.colliderect(b.rect):
-                            ox = min(rect.right - b.rect.left, b.rect.right - rect.left)
-                            oy = min(rect.bottom - b.rect.top, b.rect.bottom - rect.top)
-                            if ox < oy:
-                                ball.vx *= -1
-                            else:
-                                ball.vy *= -1
+                        if brect.colliderect(b.rect):
                             b.hp -= 1
-                            shake = max(shake, 3)
+                            hit = True
                             if b.hp <= 0:
                                 destroy_brick(b)
                             else:
-                                burst(b.rect.centerx, b.rect.centery, (255, 255, 255), 6)
+                                burst(b.rect.centerx, b.rect.centery, (255, 255, 255), 5)
                             break
+                    if hit or bl[1] < -20:
+                        bullets.remove(bl)
 
-                if ball.y - BALL_R > HEIGHT:
-                    balls.remove(ball)
+                for d in drops[:]:
+                    d[1] += 2.6
+                    drect = pygame.Rect(d[0] - 20, d[1] - 20, 40, 40)
+                    if drect.colliderect(paddle):
+                        apply_powerup(d[2])
+                        drops.remove(d)
+                    elif d[1] > HEIGHT + 30:
+                        drops.remove(d)
 
-            if not balls:
-                lives -= 1
-                combo = 0
-                shake = 12
-                burst(paddle.centerx, HEIGHT - 10, (255, 80, 80), 30)
-                clear_extras()
-                reset_ball()
-                state = "lost" if lives <= 0 else "ready"
+                if not bricks and state == "playing":
+                    level += 1
+                    speed = min(MAX_SPEED, BASE_SPEED + 0.6 * (level - 1))
+                    bricks = build_bricks()
+                    clear_extras()
+                    reset_ball()
+                    state = "ready"
+                    popups.append([WIDTH // 2, HEIGHT // 2, f"LEVEL {level}!", 70, (255, 255, 120)])
 
-            if state == "playing" and "laser" in effects:
-                laser_cd -= 1
-                if laser_cd <= 0:
-                    for lx in (paddle.left + 8, paddle.right - 8):
-                        bullets.append([lx, paddle.top])
-                        burst(lx, paddle.top - 6, (255, 120, 120), 4, 0.0)
-                    laser_cd = 20
+                if "fire" in effects:
+                    for ball in balls:
+                        particles.append([ball.x + random.uniform(-4, 4), ball.y + random.uniform(-2, 6),
+                                          random.uniform(-0.6, 0.6), random.uniform(-2.2, -0.8),
+                                          random.randint(14, 22), 22,
+                                          random.choice([(255, 140, 40), (255, 200, 70), (255, 90, 30)]),
+                                          random.uniform(2.5, 4.5), -0.04])
+                    particles.append([random.uniform(paddle.left, paddle.right), paddle.top,
+                                      random.uniform(-0.3, 0.3), random.uniform(-2.0, -0.8),
+                                      random.randint(14, 22), 22, (255, 150, 50), random.uniform(2, 4), -0.04])
 
-            for bl in bullets[:]:
-                bl[1] -= 12
-                brect = pygame.Rect(bl[0] - 2, bl[1], 4, 14)
-                hit = False
-                for b in bricks:
-                    if brect.colliderect(b.rect):
-                        b.hp -= 1
-                        hit = True
-                        if b.hp <= 0:
-                            destroy_brick(b)
-                        else:
-                            burst(b.rect.centerx, b.rect.centery, (255, 255, 255), 5)
-                        break
-                if hit or bl[1] < -20:
-                    bullets.remove(bl)
+            # partikel, cincin, popup, skor
+            for p in particles:
+                p[0] += p[2]
+                p[1] += p[3]
+                p[3] += p[8]
+                p[4] -= 1
+            particles[:] = [p for p in particles if p[4] > 0]
+            for rg in rings:
+                rg[2] += (rg[6] - rg[2]) * 0.18
+                rg[3] -= 1
+            rings[:] = [rg for rg in rings if rg[3] > 0]
+            for t in popups:
+                t[1] -= 0.8
+                t[3] -= 1
+            popups[:] = [t for t in popups if t[3] > 0]
+            shake *= 0.85
+            disp_score += (score - disp_score) * 0.18
+            if abs(score - disp_score) < 1:
+                disp_score = score
+            score_pulse *= 0.88
 
-            for d in drops[:]:
-                d[1] += 2.6
-                drect = pygame.Rect(d[0] - 20, d[1] - 20, 40, 40)
-                if drect.colliderect(paddle):
-                    apply_powerup(d[2])
-                    drops.remove(d)
-                elif d[1] > HEIGHT + 30:
-                    drops.remove(d)
-
-            if not bricks and state == "playing":
-                level += 1
-                speed = min(MAX_SPEED, BASE_SPEED + 0.6 * (level - 1))
-                bricks = build_bricks()
-                clear_extras()
-                reset_ball()
-                state = "ready"
-                popups.append([WIDTH // 2, HEIGHT // 2, f"LEVEL {level}!", 70, (255, 255, 120)])
-
-            # api: bola dan papan menyemburkan api
-            if "fire" in effects:
-                for ball in balls:
-                    particles.append([ball.x + random.uniform(-4, 4), ball.y + random.uniform(-2, 6),
-                                      random.uniform(-0.6, 0.6), random.uniform(-2.2, -0.8),
-                                      random.randint(14, 22), 22,
-                                      random.choice([(255, 140, 40), (255, 200, 70), (255, 90, 30)]),
-                                      random.uniform(2.5, 4.5), -0.04])
-                particles.append([random.uniform(paddle.left, paddle.right), paddle.top,
-                                  random.uniform(-0.3, 0.3), random.uniform(-2.0, -0.8),
-                                  random.randint(14, 22), 22, (255, 150, 50), random.uniform(2, 4), -0.04])
-
-        # ----- Latar dinamis -----
+        # ----- Latar dinamis (selalu bergerak) -----
         bolt_timer -= 1
         if bolt_timer <= 0:
             x0 = random.uniform(100, 700)
@@ -655,23 +938,6 @@ def main():
             m_[3] += 0.05
             if m_[1] < -10:
                 m_[0], m_[1] = random.uniform(0, WIDTH), HEIGHT + 10
-
-        # partikel, cincin, popup
-        for p in particles:
-            p[0] += p[2]
-            p[1] += p[3]
-            p[3] += p[8]
-            p[4] -= 1
-        particles[:] = [p for p in particles if p[4] > 0]
-        for rg in rings:
-            rg[2] += (rg[6] - rg[2]) * 0.18
-            rg[3] -= 1
-        rings[:] = [rg for rg in rings if rg[3] > 0]
-        for t in popups:
-            t[1] -= 0.8
-            t[3] -= 1
-        popups[:] = [t for t in popups if t[3] > 0]
-        shake *= 0.85
 
         # ================= GAMBAR =================
         canvas.blit(sky, (0, 0))
@@ -708,7 +974,6 @@ def main():
 
         fire = "fire" in effects
 
-        # bayangan papan saat CEPAT
         if "fast" in effects:
             for idx, alpha in ((0, 35), (2, 60), (4, 90)):
                 if idx < len(paddle_hist):
@@ -717,7 +982,6 @@ def main():
                     pygame.draw.rect(gs, (*PADDLE_COLOR, alpha), gs.get_rect(), border_radius=8)
                     canvas.blit(gs, gr.topleft)
 
-        # jejak & bola
         for ball in balls:
             n = len(ball.trail)
             for i, (tx, ty) in enumerate(ball.trail):
@@ -728,19 +992,18 @@ def main():
             bpos = (int(ball.x), int(ball.y))
             glow(canvas, bpos, 26, (255, 150, 50) if fire else (255, 255, 255), 80)
             pygame.draw.circle(canvas, (255, 200, 90) if fire else (255, 255, 255), bpos, BALL_R)
-            if "slow" in effects:   # riak air hijau di sekeliling bola
+            if "slow" in effects:
                 for kk in (0, 20):
                     rr = 12 + ((tick * 0.6 + kk) % 40)
                     fade = 1 - (rr - 12) / 40
                     pygame.draw.circle(canvas, tuple(int(v * fade) for v in (80, 230, 160)), bpos, int(rr), 2)
 
-        # papan
         pc = (255, 160, 70) if fire else PADDLE_COLOR
         soft_rect_glow(canvas, paddle, pc)
         pygame.draw.rect(canvas, pc, paddle, border_radius=8)
         pygame.draw.rect(canvas, (255, 255, 255),
                          (paddle.x + 8, paddle.y + 3, paddle.w - 16, 3), border_radius=2)
-        if "wide" in effects:       # panah berdenyut di kedua ujung
+        if "wide" in effects:
             pulse = math.sin(tick * 0.2) * 3
             my = paddle.centery
             pygame.draw.polygon(canvas, (180, 235, 255), [(paddle.left - 6 - pulse, my),
@@ -767,32 +1030,31 @@ def main():
             pygame.draw.circle(canvas, tuple(int(c * a) for c in rg[5]),
                                (int(rg[0]), int(rg[1])), int(rg[2]), 3)
         for t in popups:
-            text_center(canvas, font, t[2], (t[0], t[1]), t[4])
+            text_center(canvas, fonts["pop"], t[2], (t[0], t[1]), t[4])
 
         if "slow" in effects:
             canvas.blit(slow_tint, (0, 0))
 
         # ----- HUD -----
-        canvas.blit(font.render(f"Skor: {score}", True, (255, 255, 255)), (14, 12))
-        text_center(canvas, font, f"Level {level}", (WIDTH // 2, 24), (255, 230, 120))
-        for i in range(lives):
-            draw_heart(canvas, WIDTH - 30 - i * 34, 22, 9, (255, 80, 110))
-        if combo >= 2:
-            text_center(canvas, small, f"COMBO x{combo}", (WIDTH // 2, 50), hue_color(hue * 2))
-        for i, (k, left) in enumerate(effects.items()):
-            _, col, dur, _ = POWERUPS[k]
-            y = 52 + i * 26
-            draw_orb(canvas, k, 25, y, tick, r=10, s=6, sparkle=False)
-            pygame.draw.rect(canvas, (50, 40, 80), (44, y - 3, 90, 7), border_radius=3)
-            pygame.draw.rect(canvas, col, (44, y - 3, int(90 * left / dur), 7), border_radius=3)
+        if state != "menu":
+            draw_hud(canvas, fonts, 1 + 0.22 * score_pulse, disp_score, max(best, score), level,
+                     len(bricks), play_frames, lives, combo, effects, tick, hue)
+            if state in ("ready", "playing") and not paused:
+                draw_text(canvas, fonts["label"], "←  →  Gerak        SPASI  Luncurkan        P  Jeda",
+                          (WIDTH // 2, HEIGHT - 12), (190, 170, 230), "center", alpha=170)
+        if state == "ready" and not paused:
+            draw_ready(canvas, fonts, tick)
 
-        if state == "ready":
-            text_center(canvas, font, "Tekan SPASI untuk meluncurkan bola   |   ← → untuk bergerak",
-                        (WIDTH // 2, HEIGHT // 2 + 80))
+        # ----- Layar overlay -----
+        if state == "menu":
+            canvas.blit(dim, (0, 0))
+            draw_menu(canvas, fonts, best, tick)
         elif state == "lost":
-            text_center(canvas, big, "GAME OVER", (WIDTH // 2, HEIGHT // 2 - 10), (255, 100, 120))
-            text_center(canvas, font, f"Skor akhir: {score}  -  SPASI untuk main lagi",
-                        (WIDTH // 2, HEIGHT // 2 + 45))
+            draw_gameover(canvas, fonts, dim, {
+                "score": score, "best": best, "frames": play_frames, "level": level,
+                "bricks": bricks_destroyed, "max_combo": max_combo, "new_record": new_record}, tick)
+        elif paused:
+            draw_pause(canvas, fonts, dim)
 
         ox = random.uniform(-shake, shake) if shake > 0.5 else 0
         oy = random.uniform(-shake, shake) if shake > 0.5 else 0
@@ -800,6 +1062,8 @@ def main():
         screen.blit(canvas, (ox, oy))
         pygame.display.flip()
 
+    if score > best:
+        save_best(score)
     pygame.quit()
 
 
